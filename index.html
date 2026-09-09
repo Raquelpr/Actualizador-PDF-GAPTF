@@ -44,7 +44,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f7f8fc;color:#2
         <summary style="cursor:pointer;font-weight:700;color:#26247D">Qué hace la herramienta</summary>
         <p class="info-line primary">
           <span class="info-label">Documentos</span>
-          Sustituye la <strong>cabecera y el pie de página antiguos</strong> por la plantilla corporativa vigente. Si detecta una portada o un índice, los conserva sin aplicarles la nueva cabecera y el pie.
+          Sustituye la <strong>cabecera y el pie de página antiguos</strong> por la plantilla corporativa vigente. La página 1 se actualiza siempre; los índices detectados en páginas posteriores se conservan sin cambios.
         </p>
         <p class="info-line soft">
           <span class="info-label">Infografías</span>
@@ -52,7 +52,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f7f8fc;color:#2
         </p>
         <p class="info-line soft">
           <span class="info-label">Formularios y campos rellenables</span>
-          La herramienta actualiza la plantilla del PDF, pero no modifica ni comprueba el funcionamiento de sus campos interactivos. Si el archivo contiene formularios, firmas o elementos rellenables, revise especialmente el resultado.
+          La herramienta no bloquea estos PDF, pero no modifica ni comprueba el funcionamiento de sus campos interactivos. Si el archivo contiene formularios, firmas o elementos rellenables, revise especialmente el resultado.
         </p>
         <p class="info-line soft">
           <span class="info-label">Otros documentos</span>
@@ -73,176 +73,81 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f7f8fc;color:#2
       </details>
     </div>`;
 
-    html = html.replace(
-      /    <div style="margin:16px 0 20px">[\s\S]*?    <div class="form-panel">/,
-      infoBlock + '\n\n    <div class="form-panel">'
-    );
+    const infoStart = html.indexOf('    <div style="margin:16px 0 20px">');
+    const formStart = html.indexOf('    <div class="form-panel">', infoStart);
+    if (infoStart < 0 || formStart < 0) throw new Error('No se pudo preparar la interfaz.');
+    html = html.slice(0, infoStart) + infoBlock + '\n\n' + html.slice(formStart);
 
-    html = html.replace(
-      /\n    try \{\n      const fields = doc\.getForm\(\)\.getFields\(\);[\s\S]*?\n    \}\n\n    const pdfjsDoc = await openPdfJs\(bytes\);/,
-      '\n    const pdfjsDoc = await openPdfJs(bytes);'
-    );
-
+    const formBlockStart = html.indexOf('\n    try {\n      const fields = doc.getForm().getFields();');
+    const pdfJsStart = html.indexOf('\n\n    const pdfjsDoc = await openPdfJs(bytes);', formBlockStart);
+    if (formBlockStart >= 0 && pdfJsStart > formBlockStart) {
+      html = html.slice(0, formBlockStart) + html.slice(pdfJsStart);
+    }
     html = html.replace(
       '// - formularios/PDF editables: bloqueados;',
-      '// - formularios/PDF editables: no se bloquean; se conservan y requieren revisión del resultado;'
+      '// - formularios/PDF editables: no se bloquean; requieren revisión del resultado;'
     );
 
-    const excludedPagesRx = /async function detectDocumentExcludedPages\(pdfjsDoc\) \{[\s\S]*?\n\}\n\nasync function detectInfographicTitleOnPage/;
-    const conservativeExcludedPages = `async function detectDocumentExcludedPages(pdfjsDoc) {
-  const excluded = new Set();
-  const n = pdfjsDoc.numPages;
-  if (!n) return excluded;
-
-  const idxRx = /\\b(?:ÍNDICE|INDICE|CONTENIDO|CONTENTS)\\b/i;
-  const cache = new Map();
-
-  async function info(i) {
-    if (!cache.has(i)) cache.set(i, await pageTextInfo(pdfjsDoc, i));
-    return cache.get(i);
-  }
-
-  const p1 = await info(1);
-  const p2 = n >= 2 ? await info(2) : null;
-
-  function looksLikeRealContentPage(p) {
-    if (!p) return false;
-    const text = (p.text || "").trim();
-    const words = text.split(/\\s+/).filter(Boolean);
-    const items = p.items || [];
-    const sentenceMarks = (text.match(/[.!?;:]/g) || []).length;
-    const longTextItems = items.filter(it => (it.str || "").trim().length >= 35).length;
-    const numberedSection = /\\b\\d{1,2}[\\.\\)]\\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(text);
-
-    return (
-      text.length >= 220 ||
-      words.length >= 45 ||
-      items.length >= 14 ||
-      longTextItems >= 3 ||
-      sentenceMarks >= 3 ||
-      numberedSection
+    const excludeBlock = `    const exclude = mode === "documento"
+      ? await detectDocumentExcludedPages(pdfjsDoc)
+      : new Set();`;
+    if (!html.includes(excludeBlock)) throw new Error('No se pudo aplicar la regla de página 1.');
+    html = html.replace(
+      excludeBlock,
+      excludeBlock + `\n\n    // La página 1 se actualiza siempre, aunque el detector la interprete como portada.\n    exclude.delete(1);`
     );
-  }
 
-  function looksLikeVeryObviousCover(p) {
-    if (!p || looksLikeRealContentPage(p)) return false;
-    const text = (p.text || "").trim();
-    const words = text.split(/\\s+/).filter(Boolean);
-    const items = p.items || [];
-    const sentenceMarks = (text.match(/[.!?;:]/g) || []).length;
-    const longTextItems = items.filter(it => (it.str || "").trim().length >= 35).length;
-
-    return (
-      text.length > 0 &&
-      text.length < 140 &&
-      words.length < 24 &&
-      items.length <= 8 &&
-      longTextItems <= 1 &&
-      sentenceMarks <= 1
-    );
-  }
-
-  const p1IsIndex = idxRx.test(p1.text || "");
-  const p2IsIndex = p2 ? idxRx.test(p2.text || "") : false;
-
-  // Prioridad: ante cualquier duda, la página 1 se considera contenido.
-  if (p1IsIndex) {
-    excluded.add(1);
-  } else if (looksLikeVeryObviousCover(p1)) {
-    // Si además la página 2 es índice, la estructura portada + índice es prácticamente inequívoca.
-    // En portadas extremadamente simples también se conserva la portada aunque no haya índice.
-    const extremelySparse = (p1.text || "").trim().length < 80 && (p1.items || []).length <= 5;
-    if (p2IsIndex || extremelySparse) excluded.add(1);
-  }
-
-  if (p2IsIndex) excluded.add(2);
-
-  let previousWasIndex = p2IsIndex ? 2 : (p1IsIndex ? 1 : 0);
-  for (let i = previousWasIndex + 1; previousWasIndex && i <= Math.min(n, 6); i++) {
-    const pi = await info(i);
-    if (idxRx.test(pi.text || "")) {
-      excluded.add(i);
-      previousWasIndex = i;
-      continue;
-    }
-
-    const standalonePageNums = (pi.items || []).filter(it => /^\\d{1,3}$/.test((it.str || "").trim())).length;
-    const strongIndexContinuation = standalonePageNums >= 8 && (pi.text || "").length < 1200;
-    if (strongIndexContinuation) {
-      excluded.add(i);
-      previousWasIndex = i;
-    } else {
-      break;
-    }
-  }
-
-  return excluded;
-}
-
-async function detectInfographicTitleOnPage`;
-
-    if (!excludedPagesRx.test(html)) {
-      throw new Error('No se pudo aplicar la prioridad de actualización de la página 1.');
-    }
-    html = html.replace(excludedPagesRx, conservativeExcludedPages);
-
-    const headerCleanupAnchor = '      // Protección general del contenido inferior: si hay texto o numeración';
-    const headerCleanupPatch = `      // Limpieza completa de la cabecera corporativa antigua.
-      // Se localiza el último elemento institucional de la cabecera y se limpia
-      // hasta un poco por debajo, sin invadir el primer contenido real.
+    const headerAnchor = '      // Protección general del contenido inferior: si hay texto o numeración';
+    const headerCleanup = `      // Refuerzo de limpieza de la cabecera corporativa antigua.
       if (mode === "documento") {
         try {
           const headerInfo = await pageVisualTextInfo(pdfjsDoc, pageNum);
-          const corporateHeaderRx = /(GERENCIA|ATENCI[ÓO]N PRIMARIA|[ÁA]REA DE SALUD|SERVICIO CANARIO|GOBIERNO DE CANARIAS|SANTA CRUZ DE TENERIFE|CARMEN MONTEVERDE|CP[^0-9]{0,4}[0-9]{5}|SEDE\\.|VERIFICA[_-]?DOC|DOCUMENTO ELECTR[ÓO]NICO)/i;
-
-          const topItems = headerInfo.items.filter(it =>
+          const corporateHeaderRx = /(GERENCIA|ATENCI[ÓO]N PRIMARIA|[ÁA]REA DE SALUD|SERVICIO CANARIO|GOBIERNO DE CANARIAS|SANTA CRUZ DE TENERIFE|CARMEN MONTEVERDE|CP\\s*\\d{5}|SEDE\\.|VERIFICA[_-]?DOC|DOCUMENTO ELECTR[ÓO]NICO)/i;
+          const corporateItems = headerInfo.items.filter(it =>
             Number.isFinite(it.yTop) && Number.isFinite(it.yBottom) &&
-            it.yTop >= 0 && it.yTop < H * 0.24
+            it.yTop >= 0 && it.yTop < H * 0.24 &&
+            corporateHeaderRx.test(it.str || "")
           );
-
-          const corporateItems = topItems.filter(it => corporateHeaderRx.test(it.str));
 
           if (corporateItems.length) {
             const oldHeaderBottom = Math.max(...corporateItems.map(it => it.yBottom));
-            let targetClear = oldHeaderBottom + Math.max(5, H * 0.012);
-
-            const bodyTops = topItems
+            let targetClear = oldHeaderBottom + Math.max(5, H * 0.010);
+            const bodyTops = headerInfo.items
               .filter(it =>
-                !corporateHeaderRx.test(it.str) &&
-                it.yTop > oldHeaderBottom + H * 0.006 &&
+                Number.isFinite(it.yTop) &&
+                it.yTop > oldHeaderBottom + H * 0.004 &&
+                !corporateHeaderRx.test(it.str || "") &&
                 (it.str || "").trim().length > 2
               )
               .map(it => it.yTop)
               .sort((a,b) => a-b);
 
             if (bodyTops.length) {
-              targetClear = Math.min(targetClear, bodyTops[0] - Math.max(3, H * 0.006));
+              targetClear = Math.min(targetClear, bodyTops[0] - Math.max(3, H * 0.004));
             }
 
-            targetClear = Math.min(targetClear, H * 0.22);
-            clearHeaderH = Math.max(clearHeaderH, targetClear);
+            const minimumClear = newHeaderH + Math.max(2, H * 0.003);
+            clearHeaderH = Math.min(H * 0.22, Math.max(clearHeaderH, minimumClear, targetClear));
           }
-        } catch(e) {
-          // Si no puede analizarse la cabecera, se mantiene la limpieza estándar.
-        }
+        } catch(e) {}
       }
 `;
-
-    if (!html.includes(headerCleanupAnchor)) {
-      throw new Error('No se pudo aplicar la corrección de limpieza de cabecera.');
-    }
-    html = html.replace(headerCleanupAnchor, headerCleanupPatch + '\n' + headerCleanupAnchor);
+    if (!html.includes(headerAnchor)) throw new Error('No se pudo aplicar la limpieza de cabecera.');
+    html = html.replace(headerAnchor, headerCleanup + '\n' + headerAnchor);
 
     if (html.includes('Los PDF editables no son compatibles') || html.includes('getForm().getFields()')) {
-      throw new Error('No se pudo aplicar correctamente la corrección de compatibilidad.');
+      throw new Error('No se pudo retirar el bloqueo de PDF editables.');
+    }
+    if (!html.includes('exclude.delete(1);')) {
+      throw new Error('No se pudo garantizar la actualización de la página 1.');
     }
 
     document.open();
     document.write(html);
     document.close();
   } catch (error) {
-    document.getElementById('loading').textContent = 'No se ha podido cargar la herramienta. Recargue la página e inténtelo de nuevo.';
     console.error(error);
+    document.getElementById('loading').textContent = 'No se ha podido cargar la herramienta. Recargue la página e inténtelo de nuevo.';
   }
 })();
 </script>
