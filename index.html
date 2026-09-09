@@ -84,6 +84,53 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f7f8fc;color:#2
       '// - formularios/PDF editables: no se bloquean; se conservan y requieren revisión del resultado;'
     );
 
+    const headerCleanupAnchor = '      // Protección general del contenido inferior: si hay texto o numeración';
+    const headerCleanupPatch = `      // Limpieza completa de la cabecera corporativa antigua.
+      // Se localiza el último elemento institucional de la cabecera y se limpia
+      // hasta un poco por debajo, sin invadir el primer contenido real.
+      if (mode === "documento") {
+        try {
+          const headerInfo = await pageVisualTextInfo(pdfjsDoc, pageNum);
+          const corporateHeaderRx = /(GERENCIA|ATENCI[ÓO]N PRIMARIA|[ÁA]REA DE SALUD|SERVICIO CANARIO|GOBIERNO DE CANARIAS|SANTA CRUZ DE TENERIFE|CARMEN MONTEVERDE|CP[^0-9]{0,4}[0-9]{5}|SEDE\.|VERIFICA[_-]?DOC|DOCUMENTO ELECTR[ÓO]NICO)/i;
+
+          const topItems = headerInfo.items.filter(it =>
+            Number.isFinite(it.yTop) && Number.isFinite(it.yBottom) &&
+            it.yTop >= 0 && it.yTop < H * 0.24
+          );
+
+          const corporateItems = topItems.filter(it => corporateHeaderRx.test(it.str));
+
+          if (corporateItems.length) {
+            const oldHeaderBottom = Math.max(...corporateItems.map(it => it.yBottom));
+            let targetClear = oldHeaderBottom + Math.max(5, H * 0.012);
+
+            const bodyTops = topItems
+              .filter(it =>
+                !corporateHeaderRx.test(it.str) &&
+                it.yTop > oldHeaderBottom + H * 0.006 &&
+                (it.str || "").trim().length > 2
+              )
+              .map(it => it.yTop)
+              .sort((a,b) => a-b);
+
+            if (bodyTops.length) {
+              targetClear = Math.min(targetClear, bodyTops[0] - Math.max(3, H * 0.006));
+            }
+
+            targetClear = Math.min(targetClear, H * 0.22);
+            clearHeaderH = Math.max(clearHeaderH, targetClear);
+          }
+        } catch(e) {
+          // Si no puede analizarse la cabecera, se mantiene la limpieza estándar.
+        }
+      }
+`;
+
+    if (!html.includes(headerCleanupAnchor)) {
+      throw new Error('No se pudo aplicar la corrección de limpieza de cabecera.');
+    }
+    html = html.replace(headerCleanupAnchor, headerCleanupPatch + '\n' + headerCleanupAnchor);
+
     if (html.includes('Los PDF editables no son compatibles') || html.includes('getForm().getFields()')) {
       throw new Error('No se pudo aplicar correctamente la corrección de compatibilidad.');
     }
